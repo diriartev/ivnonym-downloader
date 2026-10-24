@@ -1,0 +1,15 @@
+# Dependabot: avisa (con pull request) cuando hay actualizaciones.
+# Cada PR pasa por el CI completo antes de que lo aceptes.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      acciones:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

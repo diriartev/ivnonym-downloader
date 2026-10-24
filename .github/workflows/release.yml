@@ -1,0 +1,186 @@
+# ==============================================================================
+#  Release (semi-automático): se dispara al subir una etiqueta vX.Y.Z.
+#   1. Repite TODO el CI.
+#   2. Espera tu aprobación (entorno "produccion").
+#   3a. Repo con Dockerfile: construye, vuelve a probar la MISMA imagen, la publica
+#       en ghcr.io, la firma (Sigstore, sin llaves) y adjunta SBOM + procedencia.
+#   3b. Repo sin Dockerfile: empaqueta el código de esa etiqueta + SHA256SUMS y
+#       genera un certificado de procedencia firmado.
+#   4. Crea el Release de GitHub con instrucciones de verificación.
+#  No usa ningún secreto guardado: solo el token temporal de esta ejecución.
+# ==============================================================================
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verificar:
+    name: Verificar (CI completo)
+    uses: ./.github/workflows/ci.yml
+
+  publicar:
+    name: Publicar ${{ github.ref_name }}
+    needs: verificar
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment:
+      name: produccion       # ⏸ aquí espera a que apruebes
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+    permissions:
+      contents: write        # crear el Release
+      packages: write        # subir la imagen a ghcr.io
+      id-token: write        # firma sin llaves (Sigstore) y certificado de procedencia
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Qué hay en el repo
+        id: info
+        run: |
+          bash ci/revisar.sh info | tee -a "$GITHUB_OUTPUT"
+          echo "IMAGEN=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"   # ghcr exige minúsculas
+
+      # ---------------- 3a. Repo con Docker ----------------
+      - if: steps.info.outputs.docker == 'true'
+        run: bash ci/revisar.sh espacio
+
+      - if: steps.info.outputs.docker == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Construir imagen candidata
+        if: steps.info.outputs.docker == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ steps.info.outputs.contexto }}
+          file: ${{ steps.info.outputs.dockerfile }}
+          load: true
+          push: false
+          tags: ${{ env.IMAGEN }}:candidata
+
+      - name: Probar la imagen candidata (la misma que se publicará)
+        if: steps.info.outputs.docker == 'true'
+        run: IMAGEN_PRUEBA="$IMAGEN:candidata" bash ci/revisar.sh pruebas vulnerabilidades
+
+      - name: Login en ghcr.io (token temporal de esta ejecución)
+        if: steps.info.outputs.docker == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Etiquetas de la imagen
+        if: steps.info.outputs.docker == 'true'
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGEN }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Publicar imagen (con SBOM y procedencia)
+        if: steps.info.outputs.docker == 'true'
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ steps.info.outputs.contexto }}
+          file: ${{ steps.info.outputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Certificado de procedencia de la imagen
+        if: steps.info.outputs.docker == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGEN }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - if: steps.info.outputs.docker == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Firmar imagen con Sigstore (sin llaves)
+        if: steps.info.outputs.docker == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGEN@$DIGEST"
+
+      # ---------------- 3b. Repo sin Docker ----------------
+      - name: Empaquetar el código de la etiqueta + SHA256SUMS
+        if: steps.info.outputs.docker != 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+          NOMBRE: ${{ github.event.repository.name }}
+        run: |
+          mkdir dist
+          git archive --format=tar.gz --prefix="$NOMBRE-$TAG/" -o "dist/$NOMBRE-$TAG.tar.gz" "$TAG"
+          git archive --format=zip    --prefix="$NOMBRE-$TAG/" -o "dist/$NOMBRE-$TAG.zip"    "$TAG"
+          (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Certificado de procedencia de los archivos
+        if: steps.info.outputs.docker != 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      # ---------------- 4. Release ----------------
+      - name: Crear Release en GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          NOMBRE: ${{ github.event.repository.name }}
+          DOCKER: ${{ steps.info.outputs.docker }}
+        run: |
+          if [ "$DOCKER" = true ]; then
+            cat > notas.md <<EOF
+          ## 🐳 Imagen Docker verificada
+
+          \`\`\`bash
+          docker pull $IMAGEN:${TAG#v}
+          \`\`\`
+
+          Digest: \`$DIGEST\`
+
+          ### Verificar que la publicó este repo (opcional)
+
+          \`\`\`bash
+          cosign verify $IMAGEN@$DIGEST \\
+            --certificate-identity-regexp "^https://github.com/$REPO/.github/workflows/release.yml@refs/tags/" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          \`\`\`
+          EOF
+            ARCHIVOS=()
+          else
+            cat > notas.md <<EOF
+          ## 📦 Código verificado
+
+          Descarga \`$NOMBRE-$TAG.tar.gz\` (o el \`.zip\`) y comprueba que no fue alterado:
+
+          \`\`\`bash
+          sha256sum -c SHA256SUMS --ignore-missing
+          gh attestation verify $NOMBRE-$TAG.tar.gz --repo $REPO
+          \`\`\`
+          EOF
+            ARCHIVOS=(dist/*)
+          fi
+          echo "Todas las revisiones de seguridad y pruebas pasaron antes de publicar." >> notas.md
+          gh release create "$TAG" --repo "$REPO" --verify-tag --generate-notes \
+            --title "$NOMBRE $TAG" --notes-file notas.md "${ARCHIVOS[@]}"

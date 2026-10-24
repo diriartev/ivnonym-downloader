@@ -1,0 +1,22 @@
+# Secretos / configuración local
+.env
+*.env
+!.env.example
+
+# Descargas y temporales
+downloads/
+.tmp/
+*.part
+*.ytdl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Sistema / editores
+.DS_Store
+.directory
+*.desktop
+.idea/
+.vscode/

@@ -1,0 +1,57 @@
+services:
+  media-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE:-ivnonym-downloader:hardened}
+    restart: unless-stopped
+
+    # Usuario sin privilegios (nunca root)
+    user: "1000:1000"
+
+    # Cero capacidades del kernel y sin escalamiento de privilegios
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # Sistema de archivos del contenedor inmutable
+    read_only: true
+
+    # Temporales en RAM
+    tmpfs:
+      - /tmp:size=512M,mode=1777,noexec,nosuid,nodev
+      - /run:size=16M,mode=1777,noexec,nosuid,nodev
+      - /home/appuser/.cache:size=512M,mode=1777,noexec,nosuid,nodev
+
+    # Almacén temporal interno (volumen Docker, sin rutas de tu equipo).
+    # Tú eliges dónde guardar cada archivo con "Guardar como" en la web.
+    volumes:
+      - descargas-temp:/downloads
+
+    # Solo accesible desde tu propio equipo (localhost)
+    ports:
+      - "127.0.0.1:${PORT:-5050}:5050"
+
+    environment:
+      - PORT=5050
+      - DOWNLOAD_DIR=/downloads
+      - FILE_TTL_HOURS=${FILE_TTL_HOURS:-3}
+      - PYTHONUNBUFFERED=1
+
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 3072M
+          pids: 200
+
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5050/api/status')\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  descargas-temp:

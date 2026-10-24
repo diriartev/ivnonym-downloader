@@ -1,0 +1,13 @@
+# Linter de Python (ruff): errores reales, bugs y seguridad (reglas de bandit "S")
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = ["E9", "F", "B", "S", "PLE", "UP"]
+ignore = [
+  "S104",  # escuchar en 0.0.0.0 es correcto DENTRO del contenedor; el puerto solo se publica en 127.0.0.1
+  "S603",  # subprocess sin shell=True y con lista de argumentos (seguro); las URL se validan antes
+  "S607",  # ffmpeg / yt-dlp / xdg-open se buscan en el PATH del contenedor, que es de solo lectura
+  "S110",  # try/except/pass en limpiezas "best effort"
+  "UP",    # modernizaciones de sintaxis: no son bugs
+]

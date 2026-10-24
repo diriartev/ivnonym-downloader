@@ -1,0 +1,53 @@
+# ==============================================================================
+#  CI Seguro: se ejecuta en cada push y pull request.
+#  Mismas etapas que `bash ci/revisar.sh` en tu PC. Sin secretos: solo lectura.
+#  Instalado con el kit ci-seguro (git ci-seguro). No hace falta editarlo.
+# ==============================================================================
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:      # lo reutiliza release.yml antes de publicar
+  workflow_dispatch:  # botón "Run workflow" manual
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
+
+jobs:
+  secretos:
+    name: 1 · Secretos (gitleaks, todo el historial)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: bash ci/revisar.sh secretos
+
+  analisis:
+    name: 2-4 · Código, configuración y dependencias
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash ci/revisar.sh lint config deps
+
+  pruebas:
+    name: 5-7 · Build, pruebas y vulnerabilidades
+    needs: [secretos, analisis]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash ci/revisar.sh espacio build pruebas vulnerabilidades

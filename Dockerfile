@@ -1,7 +1,7 @@
 # ==============================================================
 # Hardened Minimal Media Downloader Container
 # ==============================================================
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 # Metadatos
 LABEL org.opencontainers.image.title="Ivnonym Downloader"
